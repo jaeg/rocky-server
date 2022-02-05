@@ -4,83 +4,79 @@ import (
 	"context"
 	"flag"
 	"net"
-	"os"
 	"sync"
 	"time"
 
-	"github.com/google/logger"
 	"github.com/google/uuid"
+	"github.com/jaeg/rocky-server/proxy"
+	log "github.com/sirupsen/logrus"
 )
 
 const AppName = "rocker-server"
 
 var certFile = flag.String("cert-file", "", "location of cert file")
 var keyFile = flag.String("key-file", "", "location of key file")
-var logPath = flag.String("log-path", "./logs.txt", "Logs location")
 
-var communicationPort = flag.String("communication-port", ":9998", "Port that is used for individual proxying requests")
+var tunnelPort = flag.String("tunnel-port", ":9998", "Port that is used for individual proxying requests")
 var serverPort = flag.String("server-port", ":9999", "Port rocky clients connect to for management")
 var proxyPort = flag.String("proxy-port", ":8099", "Port real clients connect to IE the exposed port")
 
 type App struct {
-	connections           map[string]net.Conn
-	connectionLock        *sync.Mutex
-	communicationListener net.Listener
-	serverListener        net.Listener
-	proxyListener         net.Listener
+	tunnels        map[string]net.Conn
+	tunnelLock     *sync.Mutex
+	tunnelListener net.Listener
+	serverListener net.Listener
+	proxyListener  net.Listener
 }
 
 func (a *App) Init() {
-	a.connections = make(map[string]net.Conn)
-	a.connectionLock = &sync.Mutex{}
+	a.tunnels = make(map[string]net.Conn)
+	a.tunnelLock = &sync.Mutex{}
 	flag.Parse()
 
 	//Start the logger
-	lf, err := os.OpenFile(*logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0660)
-	if err != nil {
-		logger.Fatalf("Failed to open log file: %v", err)
-	}
+	log.SetLevel(log.DebugLevel)
 
-	logger.Init(AppName, true, true, lf)
+	log.WithFields(log.Fields{
+		"Name": AppName,
+	}).Info("Started")
 
-	logger.Infof("%s Starting", AppName)
-
+	var err error
 	a.serverListener, err = net.Listen("tcp", *serverPort)
 	if err != nil {
-		logger.Errorf("Error listening on server port  %s", err.Error())
+		log.WithError(err).Error("Error listening on server port")
 		return
 	}
 
 	a.proxyListener, err = net.Listen("tcp", *proxyPort)
 	if err != nil {
-		logger.Errorf("Error listening on proxy port  %s", err.Error())
+		log.WithError(err).Error("Error listening on proxy port")
 
 		return
 	}
 
-	a.communicationListener, err = net.Listen("tcp", *communicationPort)
+	a.tunnelListener, err = net.Listen("tcp", *tunnelPort)
 	if err != nil {
-		logger.Errorf("Error listening on communication port  %s", err.Error())
+		log.WithError(err).Error("Error listening on communication port")
 		return
 	}
 }
 
 func (a *App) Run(ctx context.Context) {
-	defer logger.Close()
-	go a.handleProxy(a.communicationListener)
+	go a.handleTunnelListener(a.tunnelListener)
 	//Run the http server
 	go func() {
 		for {
 			select {
 			case <-ctx.Done():
-				logger.Info("Killing thread")
+				log.Info("Killing main thread")
 			default:
 				conn, err := a.serverListener.Accept()
 				if err != nil {
-					logger.Errorf("Error accepting incoming message on server port: %s", err.Error())
+					log.WithError(err).Error("Error accepting incoming message on server port")
 				} else {
 					//New client with traffic that needs forwarded to it.
-					go a.handleIncomingClients(conn)
+					go a.handleClient(conn)
 				}
 			}
 		}
@@ -89,98 +85,111 @@ func (a *App) Run(ctx context.Context) {
 	// Handle shutdowns gracefully
 	<-ctx.Done()
 
-	logger.Info("Server shutdown")
+	log.Info("Server shutdown")
 }
 
-func (a *App) handleProxy(ln net.Listener) {
+// Checks for new tunnel connections to proxy data through and adds them to the connections map.
+func (a *App) handleTunnelListener(tunnelListener net.Listener) {
 	for {
-		conn, err := ln.Accept()
+		//Accept connections on the tunnel listener port.
+		conn, err := tunnelListener.Accept()
 		if err != nil {
-			logger.Errorf("Proxy thread failed:  %s", err.Error())
+			log.WithError(err).Error("Proxy thread failed")
 			return
 		}
+
+		// First message in the tunnel is an ID.
 		buf := make([]byte, 36)
-		conn.Read(buf)
+		_, err = conn.Read(buf)
+		if err != nil {
+			log.WithError(err).Error("Failed reading from tunnel port")
+			conn.Close()
+			continue
+		}
 		id := string(buf)
 
-		a.connectionLock.Lock()
-		a.connections[id] = conn
-		a.connectionLock.Unlock()
+		//Add ID to tunnel map.
+		a.tunnelLock.Lock()
+		a.tunnels[id] = conn
+		a.tunnelLock.Unlock()
 	}
 }
 
-func handleToTarget(conn net.Conn, targetConn net.Conn) {
-	for {
-		buf := make([]byte, 1)
-		_, err := conn.Read(buf)
-		if err != nil {
-			logger.Errorf("Error reading to target:  %s", err.Error())
-			return
-		}
-
-		targetConn.Write(buf)
-	}
-}
-
-func handleFromTarget(conn net.Conn, targetConn net.Conn) {
-	for {
-		buf := make([]byte, 1)
-		_, err := targetConn.Read(buf)
-		if err != nil {
-			logger.Errorf("Error reading from target  %s", err.Error())
-
-			return
-		}
-		conn.Write(buf)
-	}
-}
-
-func (a *App) handleIncomingClients(targetConn net.Conn) {
-	logger.Info("Handling new client")
-	defer logger.Info("Incoming Thread Died")
+//Handles listening for incoming proxy clients that want to expose their targets.
+func (a *App) handleClient(clientManagementConn net.Conn) {
+	log.Debug("Handling new client")
+	defer log.Info("handleClient thread died")
 
 	for {
-		clientConn, err := a.proxyListener.Accept()
+		//Accept incoming traffic to proxy.
+		incomingRequestConn, err := a.proxyListener.Accept()
 		if err != nil {
-			logger.Errorf("Error accepting  %s", err.Error())
-			return
+			log.WithError(err).Error("Error accepting proxy client")
+			continue
 		}
 
-		logger.Info("New connection to proxy")
+		log.Info("New connection to proxy")
+		//Generate a new id and send it to the proxy client to signal it to create a new tunnel connection.
 		generatedId := uuid.New().String()
-		targetConn.Write([]byte("New\n"))
-		targetConn.Write([]byte(generatedId + "\n"))
+		_, err = clientManagementConn.Write([]byte("New\n"))
 
-		logger.Infof("Send id %s", generatedId)
-		buf := make([]byte, len(generatedId))
-		targetConn.Read(buf)
-		id := string(buf)
-		logger.Infof("ID returned %s", id)
-		if id != generatedId {
-			logger.Error("Proxy failed, mismatched IDs")
+		if err != nil {
+			log.WithField("Id", generatedId).WithError(err).Error("Failed writing to management port")
+			incomingRequestConn.Close()
 			return
 		}
 
+		_, err = clientManagementConn.Write([]byte(generatedId + "\n"))
+		if err != nil {
+			log.WithField("Id", generatedId).WithError(err).Error("Failed writing to management port")
+			incomingRequestConn.Close()
+			return
+		}
+
+		log.WithField("Id", generatedId).Debug("Sent generated id to proxy client, waiting for response")
+
+		// Wait for the response from the proxy client and confirm IDs.
+		buf := make([]byte, len(generatedId))
+		_, err = clientManagementConn.Read(buf)
+
+		if err != nil {
+			log.WithField("Id", generatedId).WithError(err).Error("Failed reading from management port")
+			incomingRequestConn.Close()
+			return
+		}
+
+		id := string(buf)
+		log.WithField("Id", id).Debug("ID returned from the proxy client, checking for match.")
+		if id != generatedId {
+			log.WithFields(log.Fields{"ID": id, "Gen ID": generatedId}).Error("Proxy failed, mismatched IDs")
+			incomingRequestConn.Close()
+			continue
+		}
+
+		//Wait for the proxy client to open a tunnel between it and this server.
+		log.WithField("Id", id).Debug("Waiting for connection from proxy client")
 		t := time.Now()
 		for time.Since(t) < time.Second {
-
-			a.connectionLock.Lock()
-			if a.connections[id] != nil {
-				a.connectionLock.Unlock()
+			a.tunnelLock.Lock()
+			if a.tunnels[id] != nil {
+				a.tunnelLock.Unlock()
 				break
 			}
-			a.connectionLock.Unlock()
-			time.Sleep(time.Millisecond)
+			a.tunnelLock.Unlock()
+			time.Sleep(time.Nanosecond)
 		}
 
-		a.connectionLock.Lock()
-		if a.connections[id] == nil {
-			logger.Error("Timed out waiting for connection from client")
-			return
+		//Check to see if we got a connection within the timeout.
+		a.tunnelLock.Lock()
+		if a.tunnels[id] == nil {
+			log.WithField("Id", id).Error("Timed out waiting for connection from client")
+			a.tunnelLock.Unlock()
+			continue
 		}
-		a.connectionLock.Unlock()
+		a.tunnelLock.Unlock()
 
-		go handleToTarget(clientConn, a.connections[id])
-		go handleFromTarget(clientConn, a.connections[id])
+		//Create the thread to proxy the data through the tunnel.
+		log.WithField("Id", id).Debug("Connection made with client, creating proxy thread.")
+		proxy.NewProxyThread(incomingRequestConn, a.tunnels[id])
 	}
 }
