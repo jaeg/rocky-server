@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"flag"
+	"io/ioutil"
 	"net"
 	"sync"
 	"time"
@@ -19,8 +21,9 @@ const AppName = "rocker-server"
 var proxyCertFile = flag.String("proxy-cert", "", "location of cert file")
 var proxyKeyFile = flag.String("proxy-key", "", "location of key file")
 
-var tunnelCertFile = flag.String("tunnel-cert", "", "location of cert file")
-var tunnelKeyFile = flag.String("tunnel-key", "", "location of key file")
+var communicationCertFile = flag.String("communication-cert", "certs/server.pem", "location of cert file")
+var communicationKeyFile = flag.String("communication-key", "certs/server.key", "location of key file")
+var communicationCAFile = flag.String("communication-ca", "certs/ca.crt", "location of ca file")
 
 var tunnelPort = flag.String("tunnel-port", ":9998", "Port that is used for individual proxying requests")
 var serverPort = flag.String("server-port", ":9999", "Port rocky clients connect to for management")
@@ -47,11 +50,6 @@ func (a *App) Init() {
 	}).Info("Started")
 
 	var err error
-	a.serverListener, err = net.Listen("tcp", *serverPort)
-	if err != nil {
-		log.WithError(err).Error("Error listening on server port")
-		return
-	}
 
 	if *proxyCertFile != "" {
 		log.Info("Start proxy listener with cert %s", *proxyCertFile)
@@ -77,14 +75,25 @@ func (a *App) Init() {
 		}
 	}
 
-	if *tunnelCertFile != "" {
-		log.Info("Start proxy listener with cert %s", *tunnelCertFile)
-		cert, err := tls.LoadX509KeyPair(*tunnelCertFile, *tunnelKeyFile)
+	if *communicationCertFile != "" {
+		log.Info("Start proxy listener with cert %s", *communicationCertFile)
+		cert, err := tls.LoadX509KeyPair(*communicationCertFile, *communicationKeyFile)
 		if err != nil {
 			log.WithError(err).Error("failed loading tunnel cert/key")
 			return
 		}
-		config := tls.Config{Certificates: []tls.Certificate{cert}}
+
+		caCert, err := ioutil.ReadFile(*communicationCAFile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		caCertPool := x509.NewCertPool()
+		caCertPool.AppendCertsFromPEM(caCert)
+
+		config := tls.Config{Certificates: []tls.Certificate{cert},
+			ClientCAs:  caCertPool,
+			ClientAuth: tls.RequireAndVerifyClientCert,
+		}
 		config.Rand = rand.Reader
 		a.tunnelListener, err = tls.Listen("tcp", *tunnelPort, &config)
 		if err != nil {
@@ -92,10 +101,22 @@ func (a *App) Init() {
 			return
 		}
 
+		a.serverListener, err = tls.Listen("tcp", *serverPort, &config)
+		if err != nil {
+			log.WithError(err).Error("tls server listener failed")
+			return
+		}
+
 	} else {
 		a.tunnelListener, err = net.Listen("tcp", *tunnelPort)
 		if err != nil {
 			log.WithError(err).Error("Error listening on communication port")
+			return
+		}
+
+		a.serverListener, err = net.Listen("tcp", *serverPort)
+		if err != nil {
+			log.WithError(err).Error("Error listening on server port")
 			return
 		}
 	}
