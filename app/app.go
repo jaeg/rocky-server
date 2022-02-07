@@ -16,7 +16,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-const AppName = "rocker-server"
+const AppName = "rocky-server"
 
 var proxyCertFile = flag.String("proxy-cert", "", "location of cert file")
 var proxyKeyFile = flag.String("proxy-key", "", "location of key file")
