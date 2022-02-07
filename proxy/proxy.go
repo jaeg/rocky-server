@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"net"
 
 	log "github.com/sirupsen/logrus"
@@ -13,8 +14,8 @@ type ProxyThread struct {
 	Dead         bool
 }
 
-func NewProxyThread(conn net.Conn, targetConn net.Conn) *ProxyThread {
-	p := &ProxyThread{IncomingConn: conn, TargetConn: targetConn, Dead: false}
+func NewProxyThread(ID string, conn net.Conn, targetConn net.Conn) *ProxyThread {
+	p := &ProxyThread{IncomingConn: conn, TargetConn: targetConn, Dead: false, ID: ID}
 	go p.HandleFromTarget()
 	go p.HandleToTarget()
 	return p
@@ -28,15 +29,17 @@ func (p *ProxyThread) Close() {
 
 func (p *ProxyThread) HandleToTarget() {
 	for !p.Dead {
-		buf := make([]byte, 1)
-		_, err := p.IncomingConn.Read(buf)
+		buf := bytes.NewBuffer(make([]byte, 100))
+
+		n, err := p.IncomingConn.Read(buf.Bytes())
 		if err != nil {
 			log.WithField("Id", p.ID).WithError(err).Error("Error reading data to send to target")
 			p.Close()
 			return
 		}
+		buf.Truncate(n)
 
-		_, err = p.TargetConn.Write(buf)
+		_, err = p.TargetConn.Write(buf.Bytes())
 		if err != nil {
 			log.WithField("Id", p.ID).WithError(err).Error("Error writing data to the target")
 			p.Close()
@@ -47,14 +50,16 @@ func (p *ProxyThread) HandleToTarget() {
 
 func (p *ProxyThread) HandleFromTarget() {
 	for !p.Dead {
-		buf := make([]byte, 1)
-		_, err := p.TargetConn.Read(buf)
+		buf := bytes.NewBuffer(make([]byte, 100))
+		n, err := p.TargetConn.Read(buf.Bytes())
 		if err != nil {
 			log.WithField("Id", p.ID).WithError(err).Error("Error reading data from the target to forward")
 			p.Close()
 			return
 		}
-		_, err = p.IncomingConn.Write(buf)
+
+		buf.Truncate(n)
+		_, err = p.IncomingConn.Write(buf.Bytes())
 		if err != nil {
 			log.WithField("Id", p.ID).WithError(err).Error("Error writing data from target during forward")
 			p.Close()

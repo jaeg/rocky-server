@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/tls"
 	"flag"
 	"net"
 	"sync"
@@ -14,8 +16,11 @@ import (
 
 const AppName = "rocker-server"
 
-var certFile = flag.String("cert-file", "", "location of cert file")
-var keyFile = flag.String("key-file", "", "location of key file")
+var proxyCertFile = flag.String("proxy-cert", "", "location of cert file")
+var proxyKeyFile = flag.String("proxy-key", "", "location of key file")
+
+var tunnelCertFile = flag.String("tunnel-cert", "", "location of cert file")
+var tunnelKeyFile = flag.String("tunnel-key", "", "location of key file")
 
 var tunnelPort = flag.String("tunnel-port", ":9998", "Port that is used for individual proxying requests")
 var serverPort = flag.String("server-port", ":9999", "Port rocky clients connect to for management")
@@ -48,17 +53,51 @@ func (a *App) Init() {
 		return
 	}
 
-	a.proxyListener, err = net.Listen("tcp", *proxyPort)
-	if err != nil {
-		log.WithError(err).Error("Error listening on proxy port")
+	if *proxyCertFile != "" {
+		log.Info("Start proxy listener with cert %s", *proxyCertFile)
+		cert, err := tls.LoadX509KeyPair(*proxyCertFile, *proxyKeyFile)
+		if err != nil {
+			log.WithError(err).Error("proxy cert/key failed to load")
+			return
+		}
+		config := tls.Config{Certificates: []tls.Certificate{cert}}
+		config.Rand = rand.Reader
+		a.proxyListener, err = tls.Listen("tcp", *proxyPort, &config)
+		if err != nil {
+			log.WithError(err).Error("tls proxy listener failed")
+			return
+		}
 
-		return
+	} else {
+		a.proxyListener, err = net.Listen("tcp", *proxyPort)
+		if err != nil {
+			log.WithError(err).Error("Error listening on proxy port")
+
+			return
+		}
 	}
 
-	a.tunnelListener, err = net.Listen("tcp", *tunnelPort)
-	if err != nil {
-		log.WithError(err).Error("Error listening on communication port")
-		return
+	if *tunnelCertFile != "" {
+		log.Info("Start proxy listener with cert %s", *tunnelCertFile)
+		cert, err := tls.LoadX509KeyPair(*tunnelCertFile, *tunnelKeyFile)
+		if err != nil {
+			log.WithError(err).Error("failed loading tunnel cert/key")
+			return
+		}
+		config := tls.Config{Certificates: []tls.Certificate{cert}}
+		config.Rand = rand.Reader
+		a.tunnelListener, err = tls.Listen("tcp", *tunnelPort, &config)
+		if err != nil {
+			log.WithError(err).Error("tls tunnel listener failed")
+			return
+		}
+
+	} else {
+		a.tunnelListener, err = net.Listen("tcp", *tunnelPort)
+		if err != nil {
+			log.WithError(err).Error("Error listening on communication port")
+			return
+		}
 	}
 }
 
@@ -123,6 +162,7 @@ func (a *App) handleClient(clientManagementConn net.Conn) {
 	for {
 		//Accept incoming traffic to proxy.
 		incomingRequestConn, err := a.proxyListener.Accept()
+
 		if err != nil {
 			log.WithError(err).Error("Error accepting proxy client")
 			continue
@@ -190,6 +230,6 @@ func (a *App) handleClient(clientManagementConn net.Conn) {
 
 		//Create the thread to proxy the data through the tunnel.
 		log.WithField("Id", id).Debug("Connection made with client, creating proxy thread.")
-		proxy.NewProxyThread(incomingRequestConn, a.tunnels[id])
+		proxy.NewProxyThread(id, incomingRequestConn, a.tunnels[id])
 	}
 }
