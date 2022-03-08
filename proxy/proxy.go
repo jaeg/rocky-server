@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"bytes"
+	"io"
 	"net"
+	"strings"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -33,16 +35,22 @@ func (p *ProxyThread) HandleToTarget() {
 
 		n, err := p.IncomingConn.Read(buf.Bytes())
 		if err != nil {
-			log.WithField("Id", p.ID).WithError(err).Error("Error reading data to send to target")
+			if err != io.EOF && !strings.Contains(err.Error(), net.ErrClosed.Error()) {
+				log.WithField("Id", p.ID).WithError(err).Error("Error reading data to send to target")
+			}
 			p.Close()
+
 			return
 		}
 		buf.Truncate(n)
 
 		_, err = p.TargetConn.Write(buf.Bytes())
 		if err != nil {
-			log.WithField("Id", p.ID).WithError(err).Error("Error writing data to the target")
+			if err != io.EOF && !strings.Contains(err.Error(), net.ErrClosed.Error()) {
+				log.WithField("Id", p.ID).WithError(err).Error("Error writing data to the target")
+			}
 			p.Close()
+
 			return
 		}
 	}
@@ -53,7 +61,9 @@ func (p *ProxyThread) HandleFromTarget() {
 		buf := bytes.NewBuffer(make([]byte, 100))
 		n, err := p.TargetConn.Read(buf.Bytes())
 		if err != nil {
-			log.WithField("Id", p.ID).WithError(err).Error("Error reading data from the target to forward")
+			if err != io.EOF && !strings.Contains(err.Error(), net.ErrClosed.Error()) {
+				log.WithField("Id", p.ID).WithError(err).Error("Error reading data from the target to forward")
+			}
 			p.Close()
 			return
 		}
@@ -61,7 +71,9 @@ func (p *ProxyThread) HandleFromTarget() {
 		buf.Truncate(n)
 		_, err = p.IncomingConn.Write(buf.Bytes())
 		if err != nil {
-			log.WithField("Id", p.ID).WithError(err).Error("Error writing data from target during forward")
+			if err != io.EOF && !strings.Contains(err.Error(), net.ErrClosed.Error()) {
+				log.WithField("Id", p.ID).WithError(err).Error("Error writing data from target during forward")
+			}
 			p.Close()
 			return
 		}

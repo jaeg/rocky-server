@@ -21,9 +21,9 @@ const AppName = "rocky-server"
 var proxyCertFile = flag.String("proxy-cert", "", "location of cert file")
 var proxyKeyFile = flag.String("proxy-key", "", "location of key file")
 
-var communicationCertFile = flag.String("communication-cert", "certs/server.pem", "location of cert file")
-var communicationKeyFile = flag.String("communication-key", "certs/server.key", "location of key file")
-var communicationCAFile = flag.String("communication-ca", "certs/ca.crt", "location of ca file")
+var communicationCertFilePath = flag.String("communication-cert", "certs/server.pem", "location of cert file")
+var communicationKeyFilePath = flag.String("communication-key", "certs/server.key", "location of key file")
+var communicationCAFilePath = flag.String("communication-ca", "certs/ca.crt", "location of ca file")
 
 var tunnelPort = flag.String("tunnel-port", ":9998", "Port that is used for individual proxying requests")
 var serverPort = flag.String("server-port", ":9999", "Port rocky clients connect to for management")
@@ -75,15 +75,15 @@ func (a *App) Init() {
 		}
 	}
 
-	if *communicationCertFile != "" {
-		log.Info("Start proxy listener with cert %s", *communicationCertFile)
-		cert, err := tls.LoadX509KeyPair(*communicationCertFile, *communicationKeyFile)
+	if *communicationCertFilePath != "" {
+		log.Info("Start proxy listener with cert %s", *communicationCertFilePath)
+		cert, err := tls.LoadX509KeyPair(*communicationCertFilePath, *communicationKeyFilePath)
 		if err != nil {
 			log.WithError(err).Error("failed loading tunnel cert/key")
 			return
 		}
 
-		caCert, err := ioutil.ReadFile(*communicationCAFile)
+		caCert, err := ioutil.ReadFile(*communicationCAFilePath)
 		if err != nil {
 			log.Fatal(err)
 		}
